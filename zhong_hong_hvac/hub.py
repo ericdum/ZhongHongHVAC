@@ -13,6 +13,7 @@ from . import helper, protocol
 logger = logging.getLogger(__name__)
 
 SOCKET_BUFSIZE = 1024
+MAX_RETRY = 5
 
 
 class ZhongHongGateway:
@@ -30,6 +31,10 @@ class ZhongHongGateway:
     def __get_socket(self) -> socket.socket:
         logger.debug("Opening socket to (%s, %s)", self.ip_addr, self.port)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
         s.connect((self.ip_addr, self.port))
         return s
 
@@ -62,12 +67,14 @@ class ZhongHongGateway:
         message.add(ac_addr)
         return self.send(message)
 
+    _retries = 0
     def send(self, ac_data: protocol.AcData) -> None:
         try:
             self.sock.settimeout(10.0)
             logger.debug("send >> %s", ac_data.hex())
             self.sock.send(ac_data.encode())
             self.sock.settimeout(None)
+            self._retries = 0
 
         except socket.timeout:
             logger.error("Connot connect to gateway %s:%s", self.ip_addr,
@@ -75,9 +82,14 @@ class ZhongHongGateway:
             return None
 
         except OSError as e:
+            logger.debug("OSError [%d]: %s at %s" , e.errno, e.strerror, e.filename)
             if e.errno == 32:  # Broken pipe
                 logger.error("OSError 32 raise, Broken pipe", exc_info=e)
             self.open_socket()
+            if self._retries < MAX_RETRY:
+                ++self._retries
+                logger.debug("retry send() by %d times", self._retries)
+                self.send(ac_data)
 
     def _validate_data(self, data):
         if data is None:
@@ -91,7 +103,7 @@ class ZhongHongGateway:
             return self.sock.recv(SOCKET_BUFSIZE)
 
         except ConnectionResetError:
-            logger.debug("Connection reset by peer")
+            logger.debug("[recv] Connection reset by peer")
             self.open_socket()
 
         except socket.timeout as e:
@@ -99,13 +111,13 @@ class ZhongHongGateway:
 
         except OSError as e:
             if e.errno == 9:  # when socket close, errorno 9 will raise
-                logger.debug("OSError 9 raise, socket is closed")
+                logger.debug("[recv] OSError 9 raise, socket is closed")
 
             else:
-                logger.error("unknown error when recv", exc_info=e)
+                logger.error("[recv] unknown error when recv", exc_info=e)
 
         except Exception:
-            logger.error("unknown error when recv", exc_info=e)
+            logger.error("[recv] unknown error when recv", exc_info=e)
 
         return None
 
