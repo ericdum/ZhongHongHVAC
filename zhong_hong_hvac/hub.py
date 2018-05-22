@@ -87,8 +87,8 @@ class ZhongHongGateway:
                 logger.error("OSError 32 raise, Broken pipe", exc_info=e)
             self.open_socket()
             if self._retries < MAX_RETRY:
-                ++self._retries
-                logger.debug("retry send() by %d times", self._retries)
+                self._retries = self._retries + 1
+                logger.debug("OSError retry send() by %d times", self._retries)
                 self.send(ac_data)
 
     def _validate_data(self, data):
