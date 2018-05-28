@@ -3,6 +3,7 @@ import logging
 import socket
 import time
 from collections import defaultdict
+from sys import platform
 from threading import Thread
 from typing import Callable, DefaultDict, List
 
@@ -27,14 +28,17 @@ class ZhongHongGateway:
         self.devices = {}
         self._listening = False
         self._threads = []
+        self.max_retry = 5
 
     def __get_socket(self) -> socket.socket:
         logger.debug("Opening socket to (%s, %s)", self.ip_addr, self.port)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        if platform in ('linux', 'linux2'):
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)  # pylint: disable=E1101
+        if platform in ('darwin', 'linux', 'linux2'):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
         s.connect((self.ip_addr, self.port))
         return s
 
@@ -69,27 +73,28 @@ class ZhongHongGateway:
 
     _retries = 0
     def send(self, ac_data: protocol.AcData) -> None:
-        try:
-            self.sock.settimeout(10.0)
-            logger.debug("send >> %s", ac_data.hex())
-            self.sock.send(ac_data.encode())
-            self.sock.settimeout(None)
-            self._retries = 0
+        def _send(retry_count):
+            try:
+                self.sock.settimeout(10.0)
+                logger.debug("send >> %s", ac_data.hex())
+                self.sock.send(ac_data.encode())
+                self.sock.settimeout(None)
 
-        except socket.timeout:
-            logger.error("Connot connect to gateway %s:%s", self.ip_addr,
-                         self.port)
-            return None
+            except socket.timeout:
+                logger.error("Connot connect to gateway %s:%s", self.ip_addr,
+                             self.port)
+                return
 
-        except OSError as e:
-            logger.debug("OSError [%d]: %s at %s" , e.errno, e.strerror, e.filename)
-            if e.errno == 32:  # Broken pipe
-                logger.error("OSError 32 raise, Broken pipe", exc_info=e)
-            self.open_socket()
-            if self._retries < MAX_RETRY:
-                self._retries = self._retries + 1
-                logger.debug("OSError retry send() by %d times", self._retries)
-                self.send(ac_data)
+            except OSError as e:
+                logger.debug("OSError [%d]: %s at %s" , e.errno, e.strerror, e.filename)
+                if e.errno == 32:  # Broken pipe
+                    logger.error("OSError 32 raise, Broken pipe", exc_info=e)
+                self.open_socket()
+                if retry_count < self.max_retry:
+                    retry_count += 1
+                    _send(retry_count)
+
+        _send(0)
 
     def _validate_data(self, data):
         if data is None:
@@ -99,6 +104,9 @@ class ZhongHongGateway:
         return True
 
     def _get_data(self):
+        if self.sock is None:
+            self.open_socket()
+
         try:
             return self.sock.recv(SOCKET_BUFSIZE)
 
@@ -107,7 +115,7 @@ class ZhongHongGateway:
             self.open_socket()
 
         except socket.timeout as e:
-            logger.error(e)
+            logger.error("timeout error", exc_info=e)
 
         except OSError as e:
             if e.errno == 9:  # when socket close, errorno 9 will raise
@@ -116,7 +124,7 @@ class ZhongHongGateway:
             else:
                 logger.error("[recv] unknown error when recv", exc_info=e)
 
-        except Exception:
+        except Exception as e:
             logger.error("[recv] unknown error when recv", exc_info=e)
 
         return None
@@ -150,7 +158,6 @@ class ZhongHongGateway:
                     for payload in ac_data:
                         device = self.get_device(payload)
                         device.set_attr(header.func_code, header.ctl_code)
-
 
     def start_listen(self):
         """Start listening."""
